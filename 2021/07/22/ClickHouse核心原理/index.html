@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  
+  
+  <title>ClickHouse核心原理 | Hexo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+  <meta name="description" content="概述ClickHouse有很多表引擎，表引擎决定了数据以什么方式存储，以什么方式加载，以及数据表拥有什么样的特性。 目前ClickHouse拥有MergeTree、外存、内存、网络接口等20多种表引擎，其中最体现ClickHouse性能特点的是MergeTree及其家族表引擎。并且当前ClickHouse也只有MergeTree及其家族表引擎支持主键索引、数据分区、数据副本等优秀特性。 而随着业务">
+<meta property="og:type" content="article">
+<meta property="og:title" content="ClickHouse核心原理">
+<meta property="og:url" content="http://example.com/2021/07/22/ClickHouse%E6%A0%B8%E5%BF%83%E5%8E%9F%E7%90%86/index.html">
+<meta property="og:site_name" content="Hexo">
+<meta property="og:description" content="概述ClickHouse有很多表引擎，表引擎决定了数据以什么方式存储，以什么方式加载，以及数据表拥有什么样的特性。 目前ClickHouse拥有MergeTree、外存、内存、网络接口等20多种表引擎，其中最体现ClickHouse性能特点的是MergeTree及其家族表引擎。并且当前ClickHouse也只有MergeTree及其家族表引擎支持主键索引、数据分区、数据副本等优秀特性。 而随着业务">
+<meta property="og:locale" content="en_US">
+<meta property="article:published_time" content="2021-07-22T10:01:11.000Z">
+<meta property="article:modified_time" content="2021-07-22T10:48:20.006Z">
+<meta property="article:author" content="John Doe">
+<meta name="twitter:card" content="summary">
+  
+    <link rel="alternate" href="/atom.xml" title="Hexo" type="application/atom+xml">
+  
+  
+    <link rel="shortcut icon" href="/favicon.png">
+  
+  
+    
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/typeface-source-code-pro@0.0.71/index.min.css">
+
+  
+  
+<link rel="stylesheet" href="/css/style.css">
+
+  
+    
+<link rel="stylesheet" href="/fancybox/jquery.fancybox.min.css">
+
+  
+<meta name="generator" content="Hexo 5.4.0"></head>
+
+<body>
+  <div id="container">
+    <div id="wrap">
+      <header id="header">
+  <div id="banner"></div>
+  <div id="header-outer" class="outer">
+    <div id="header-title" class="inner">
+      <h1 id="logo-wrap">
+        <a href="/" id="logo">Hexo</a>
+      </h1>
+      
+    </div>
+    <div id="header-inner" class="inner">
+      <nav id="main-nav">
+        <a id="main-nav-toggle" class="nav-icon"></a>
+        
+          <a class="main-nav-link" href="/">Home</a>
+        
+          <a class="main-nav-link" href="/archives">Archives</a>
+        
+      </nav>
+      <nav id="sub-nav">
+        
+          <a id="nav-rss-link" class="nav-icon" href="/atom.xml" title="RSS Feed"></a>
+        
+        <a id="nav-search-btn" class="nav-icon" title="Search"></a>
+      </nav>
+      <div id="search-form-wrap">
+        <form action="//google.com/search" method="get" accept-charset="UTF-8" class="search-form"><input type="search" name="q" class="search-form-input" placeholder="Search"><button type="submit" class="search-form-submit">&#xF002;</button><input type="hidden" name="sitesearch" value="http://example.com"></form>
+      </div>
+    </div>
+  </div>
+</header>
+
+      <div class="outer">
+        <section id="main"><article id="post-ClickHouse核心原理" class="h-entry article article-type-post" itemprop="blogPost" itemscope itemtype="https://schema.org/BlogPosting">
+  <div class="article-meta">
+    <a href="/2021/07/22/ClickHouse%E6%A0%B8%E5%BF%83%E5%8E%9F%E7%90%86/" class="article-date">
+  <time class="dt-published" datetime="2021-07-22T10:01:11.000Z" itemprop="datePublished">2021-07-22</time>
+</a>
+    
+  </div>
+  <div class="article-inner">
+    
+    
+      <header class="article-header">
+        
+  
+    <h1 class="p-name article-title" itemprop="headline name">
+      ClickHouse核心原理
+    </h1>
+  
+
+      </header>
+    
+    <div class="e-content article-entry" itemprop="articleBody">
+      
+        <h2 id="概述"><a href="#概述" class="headerlink" title="概述"></a>概述</h2><p>ClickHouse有很多表引擎，表引擎决定了数据以什么方式存储，以什么方式加载，以及数据表拥有什么样的特性。</p>
+<p>目前ClickHouse拥有MergeTree、外存、内存、网络接口等20多种表引擎，其中最体现ClickHouse性能特点的是MergeTree及其家族表引擎。并且当前ClickHouse也只有MergeTree及其家族表引擎支持主键索引、数据分区、数据副本等优秀特性。</p>
+<p>而随着业务的增长，不管单节点性能多强也早晚会有遇到瓶颈的一天，我们需要使用分布式-高可用的架构进行支撑。结合ClickHouse本身，本次选用了ClickHouse复制表和分布式表。</p>
+<h2 id="问题1：复制表与分布式表创建失败"><a href="#问题1：复制表与分布式表创建失败" class="headerlink" title="问题1：复制表与分布式表创建失败"></a>问题1：复制表与分布式表创建失败</h2><p>ClickHouse依靠ReplicatedMergeTree引擎与ZooKeeper实现了复制表机制，用户在创建表时可以通过指定引擎选择该表是否高可用，每张表的分片与副本都是互相独立的。</p>
+<p>同时ClickHouse依靠Distributed引擎实现了分布式表机制，在所有分片（本地表）上建立视图进行分布式查询，使用很方便。ClickHouse有数据分片（shard）的概念，这也是分布式存储的特点之一，即通过并行读写提高效率。</p>
+
+      
+    </div>
+    <footer class="article-footer">
+      <a data-url="http://example.com/2021/07/22/ClickHouse%E6%A0%B8%E5%BF%83%E5%8E%9F%E7%90%86/" data-id="ckreskxvw0000yhrnbmb57xx2" data-title="ClickHouse核心原理" class="article-share-link">Share</a>
+      
+      
+      
+    </footer>
+  </div>
+  
+    
+<nav id="article-nav">
+  
+  
+    <a href="/2021/07/22/hello-world/" id="article-nav-older" class="article-nav-link-wrap">
+      <strong class="article-nav-caption">Older</strong>
+      <div class="article-nav-title">Hello World</div>
+    </a>
+  
+</nav>
+
+  
+</article>
+
+
+</section>
+        
+          <aside id="sidebar">
+  
+    
+
+  
+    
+
+  
+    
+  
+    
+  <div class="widget-wrap">
+    <h3 class="widget-title">Archives</h3>
+    <div class="widget">
+      <ul class="archive-list"><li class="archive-list-item"><a class="archive-list-link" href="/archives/2021/07/">July 2021</a></li></ul>
+    </div>
+  </div>
+
+
+  
+    
+  <div class="widget-wrap">
+    <h3 class="widget-title">Recent Posts</h3>
+    <div class="widget">
+      <ul>
+        
+          <li>
+            <a href="/2021/07/22/ClickHouse%E6%A0%B8%E5%BF%83%E5%8E%9F%E7%90%86/">ClickHouse核心原理</a>
+          </li>
+        
+          <li>
+            <a href="/2021/07/22/hello-world/">Hello World</a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+
+  
+</aside>
+        
+      </div>
+      <footer id="footer">
+  
+  <div class="outer">
+    <div id="footer-info" class="inner">
+      
+      &copy; 2021 John Doe<br>
+      Powered by <a href="https://hexo.io/" target="_blank">Hexo</a>
+    </div>
+  </div>
+</footer>
+
+    </div>
+    <nav id="mobile-nav">
+  
+    <a href="/" class="mobile-nav-link">Home</a>
+  
+    <a href="/archives" class="mobile-nav-link">Archives</a>
+  
+</nav>
+    
+
+
+<script src="/js/jquery-3.4.1.min.js"></script>
+
+
+
+  
+<script src="/fancybox/jquery.fancybox.min.js"></script>
+
+
+
+
+<script src="/js/script.js"></script>
+
+
+
+
+
+  </div>
+</body>
+</html>
